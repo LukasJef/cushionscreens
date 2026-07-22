@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.atrixx.cushionscreens.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "CushionRenderDistanceMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

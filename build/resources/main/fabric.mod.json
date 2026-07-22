@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "cushionscreens",
+  "version": "0.7.0",
+  "name": "CushionScreens",
+  "description": "Show images, GIFs, and videos (with optional audio) on a screen made of cushions.",
+  "authors": ["atrixx"],
+  "contact": {
+    "repo": "https://github.com/atrixx/cushionscreens"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.atrixx.cushionscreens.CushionScreens"],
+    "client": ["dev.atrixx.cushionscreens.client.CushionScreensClient"]
+  },
+  "mixins": ["cushionscreens.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "*",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

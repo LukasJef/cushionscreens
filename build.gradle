@@ -1,0 +1,63 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    // Sem pridej dalsi repozitare, pokud budes potrebovat jine zavislosti.
+    // Loom uz sam pridava repozitare potrebne pro stazeni Minecraftu
+    // a knihoven.
+}
+
+loom {
+    // Mixiny se detekuji automaticky diky cushionscreens.mixins.json
+    // v src/main/resources a odkazu v fabric.mod.json.
+}
+
+dependencies {
+    // Minecraft 26.x+ je neobfuskovany primo od Mojangu, takze uz se
+    // NEPOUZIVA zadne "mappings ..." nastaveni (to zpusobovalo chybu
+    // "Failed to find official mojang mappings"). Ze stejneho duvodu se
+    // uz nepouzivaji "mod*" konfigurace (modImplementation apod.) - Loom
+    // nemusi nic remapovat, takze staci obycejne implementation/compileOnly.
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filteringCharset "UTF-8"
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+    it.options.release = 25
+}
+
+java {
+    withSourcesJar()
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+// Pokud mas v korenu projektu soubor LICENSE a chces ho pribalit do jaru,
+// odkomentuj:
+// jar {
+//     from("LICENSE") {
+//         rename { "${it}_${project.base.archivesName.get()}" }
+//     }
+// }

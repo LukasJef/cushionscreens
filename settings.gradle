@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    // Umoznuje Gradle automaticky stahnout a pouzit JDK 25, i kdyz ho
+    // nemas nainstalovany lokalne (tenhle Minecraft/Loom vyzaduje presne
+    // Javu 25 - viz README).
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'cushionscreens'
