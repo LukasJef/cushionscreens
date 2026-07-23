@@ -24,25 +24,39 @@ public final class CushionColorPalette {
 
     public enum Mode {
         // index 0 = waxed copper bulb (viz TIERS)
-        DEFAULT(new int[]{0}),
+        DEFAULT(new int[]{0}, 16),
         // 4 stupne oxidace medene bulvy - indexy do TIERS, NE prvni 4 v
         // poli (poradi TIERS odpovida puvodni tabulce, kde jsou mezi nimi
         // proloz furnace/respawn anchor apod.)
-        COPPER(new int[]{0, 2, 5, 8}),
-        FULL(new int[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+        COPPER(new int[]{0, 2, 5, 8}, 64),
+        // Stejne jako COPPER, ale pro kazdy cushion navic i "anyblock"
+        // (nesvitici) varianta - 5 tieru x 16 = 80.
+        COPPER_PLUS_BLACK(new int[]{0, 2, 5, 8, 10}, 80),
+        // Nepravidelny pripad: 16 barev na tier 0 (jako DEFAULT) plus JEDNA
+        // navic kombinace - cerny polstar na "anyblock" (nesvitici) bloku,
+        // pro opravdu cernou barvu (cerny polstar na svitivem bloku pod
+        // nim jinak neni uplne cerny). tierIndices se tu nepouziva - viz
+        // specialni vetve v dyeIndexForPixel/blockStateForPixel/
+        // buildFlatPalette.
+        SEVENTEEN(null, 17),
+        FULL(new int[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 176);
 
         public final int[] tierIndices;
+        public final int totalColors;
 
-        Mode(int[] tierIndices) {
+        Mode(int[] tierIndices, int totalColors) {
             this.tierIndices = tierIndices;
+            this.totalColors = totalColors;
         }
 
-        public static Mode fromArgument(String arg) {
-            if (arg == null) return DEFAULT;
-            return switch (arg) {
-                case "64" -> COPPER;
-                case "176" -> FULL;
-                default -> DEFAULT;
+        public static Mode fromColorsValue(int colors) {
+            return switch (colors) {
+                case 16 -> DEFAULT;
+                case 17 -> SEVENTEEN;
+                case 64 -> COPPER;
+                case 80 -> COPPER_PLUS_BLACK;
+                case 176 -> FULL;
+                default -> DEFAULT; // vcetne jakekoliv nezname hodnoty
             };
         }
     }
@@ -102,8 +116,22 @@ public final class CushionColorPalette {
     private CushionColorPalette() {
     }
 
+    // Cerna barva (posledni v DyeColor.values() poradi) a "anyblock" tier
+    // (posledni v TIERS) - pouzite pro tu jednu navic kombinaci v
+    // Mode.SEVENTEEN.
+    private static final int BLACK_DYE_INDEX = 15;
+    private static final int ANYBLOCK_TIER_INDEX = 10;
+
     /** Sestavi plochou paletu RGB hodnot: index = poradi_tieru_v_modu*16 + barva. */
     public static int[] buildFlatPalette(Mode mode) {
+        if (mode == Mode.SEVENTEEN) {
+            int[] flat = new int[17];
+            for (int d = 0; d < 16; ++d) {
+                flat[d] = MEASURED[d][0];
+            }
+            flat[16] = MEASURED[BLACK_DYE_INDEX][ANYBLOCK_TIER_INDEX];
+            return flat;
+        }
         int[] tiers = mode.tierIndices;
         int[] flat = new int[tiers.length * 16];
         for (int ti = 0; ti < tiers.length; ++ti) {
@@ -115,13 +143,21 @@ public final class CushionColorPalette {
         return flat;
     }
 
-    public static int dyeIndexForPixel(int flatIndex) {
+    public static int dyeIndexForPixel(Mode mode, int flatIndex) {
+        if (mode == Mode.SEVENTEEN) {
+            return flatIndex == 16 ? BLACK_DYE_INDEX : flatIndex;
+        }
         return flatIndex % 16;
     }
 
     public static BlockState blockStateForPixel(Mode mode, int flatIndex) {
-        int ti = flatIndex / 16;
-        int t = mode.tierIndices[ti];
+        int t;
+        if (mode == Mode.SEVENTEEN) {
+            t = flatIndex == 16 ? ANYBLOCK_TIER_INDEX : 0;
+        } else {
+            int ti = flatIndex / 16;
+            t = mode.tierIndices[ti];
+        }
         BlockState state = stateFor(TIERS[t]);
         return state != null ? state : DEFAULT_STATE_FALLBACK;
     }

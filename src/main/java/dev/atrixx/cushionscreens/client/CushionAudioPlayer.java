@@ -2,6 +2,7 @@ package dev.atrixx.cushionscreens.client;
 
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.SourceDataLine;
 
@@ -36,38 +37,45 @@ public final class CushionAudioPlayer {
     private CushionAudioPlayer() {
     }
 
-    public static synchronized void play(byte[] pcm, int sampleRate, int channels) {
+    public static synchronized void play(byte[] pcm, int sampleRate, int channels, boolean loop, int volume) {
         stop();
         paused = false;
         long token = ++playToken;
-        Thread t = new Thread(() -> runPlayback(pcm, sampleRate, channels, token), "cushionscreens-audio-playback");
+        Thread t = new Thread(() -> runPlayback(pcm, sampleRate, channels, loop, volume, token), "cushionscreens-audio-playback");
         t.setDaemon(true);
         t.start();
     }
 
-    private static void runPlayback(byte[] pcm, int sampleRate, int channels, long token) {
+    private static void runPlayback(byte[] pcm, int sampleRate, int channels, boolean loop, int volume, long token) {
         AudioFormat format = new AudioFormat(sampleRate, 16, channels, true, false);
         try (SourceDataLine line = AudioSystem.getSourceDataLine(format)) {
             currentLine = line;
             line.open(format);
+            applyVolume(line, volume);
             line.start();
-            int offset = 0;
-            while (offset < pcm.length) {
-                if (playToken != token) return;
-                synchronized (PAUSE_LOCK) {
-                    while (paused && playToken == token) {
-                        try {
-                            PAUSE_LOCK.wait();
-                        } catch (InterruptedException e) {
-                            return;
+            do {
+                int offset = 0;
+                while (offset < pcm.length) {
+                    if (playToken != token) return;
+                    synchronized (PAUSE_LOCK) {
+                        while (paused && playToken == token) {
+                            try {
+                                PAUSE_LOCK.wait();
+                            } catch (InterruptedException e) {
+                                return;
+                            }
                         }
                     }
+                    if (playToken != token) return;
+                    int len = Math.min(CHUNK_BYTES, pcm.length - offset);
+                    line.write(pcm, offset, len);
+                    offset += len;
                 }
-                if (playToken != token) return;
-                int len = Math.min(CHUNK_BYTES, pcm.length - offset);
-                line.write(pcm, offset, len);
-                offset += len;
-            }
+                // Poznamka: audio se smycku nezavisle na videu - u delsich
+                // prehravani muze casem mirne rozjet nesoulad s obrazem,
+                // protoze delka PCM streamu a delka smycky videa nemusi
+                // sedet uplne presne. Neresi se zatim explicitni resync.
+            } while (loop && playToken == token);
             if (playToken == token) {
                 line.drain();
             }
@@ -78,6 +86,24 @@ public final class CushionAudioPlayer {
                 currentLine = null;
             }
         }
+    }
+
+    // Prevede procenta (0-100) na decibely pro MASTER_GAIN. Aplikuje se
+    // primo na SourceDataLine misto prepocitavani PCM vzorku - zachova
+    // kvalitu (zadne zaokrouhlovani/clipping) a je to co k tomu Java Sound
+    // API nabizi.
+    private static void applyVolume(SourceDataLine line, int volumePercent) {
+        if (!line.isControlSupported(FloatControl.Type.MASTER_GAIN)) return;
+        FloatControl gain = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
+        int pct = Math.max(0, Math.min(100, volumePercent));
+        float db;
+        if (pct <= 0) {
+            db = gain.getMinimum();
+        } else {
+            db = (float) (20.0 * Math.log10(pct / 100.0));
+            db = Math.max(gain.getMinimum(), Math.min(gain.getMaximum(), db));
+        }
+        gain.setValue(db);
     }
 
     public static void pause() {

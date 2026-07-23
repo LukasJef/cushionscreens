@@ -1,6 +1,8 @@
 package dev.atrixx.cushionscreens.client;
 
 import dev.atrixx.cushionscreens.network.CushionAudioChunk;
+import dev.atrixx.cushionscreens.network.CushionAudioPause;
+import dev.atrixx.cushionscreens.network.CushionAudioResume;
 import dev.atrixx.cushionscreens.network.CushionAudioStart;
 import dev.atrixx.cushionscreens.network.CushionAudioStop;
 import net.fabricmc.api.ClientModInitializer;
@@ -29,6 +31,8 @@ public final class CushionScreensClient implements ClientModInitializer {
     private static int expectedBytes;
     private static int sampleRate;
     private static int channels;
+    private static boolean loop;
+    private static int volume;
     private static boolean wasPaused;
 
     @Override
@@ -38,6 +42,8 @@ public final class CushionScreensClient implements ClientModInitializer {
             expectedBytes = payload.totalBytes();
             sampleRate = payload.sampleRate();
             channels = payload.channels();
+            loop = payload.loop();
+            volume = payload.volume();
         });
 
         ClientPlayNetworking.registerGlobalReceiver(CushionAudioChunk.TYPE, (payload, context) -> {
@@ -49,7 +55,9 @@ public final class CushionScreensClient implements ClientModInitializer {
                 buffer = null;
                 int sr = sampleRate;
                 int ch = channels;
-                context.client().execute(() -> CushionAudioPlayer.play(pcm, sr, ch));
+                boolean lp = loop;
+                int vol = volume;
+                context.client().execute(() -> CushionAudioPlayer.play(pcm, sr, ch, lp, vol));
             }
         });
 
@@ -57,6 +65,12 @@ public final class CushionScreensClient implements ClientModInitializer {
             buffer = null;
             context.client().execute(CushionAudioPlayer::stop);
         });
+
+        ClientPlayNetworking.registerGlobalReceiver(CushionAudioPause.TYPE, (payload, context) ->
+            context.client().execute(CushionAudioPlayer::pause));
+
+        ClientPlayNetworking.registerGlobalReceiver(CushionAudioResume.TYPE, (payload, context) ->
+            context.client().execute(CushionAudioPlayer::resume));
 
         // Minecraft.isPaused() vraci true jedine kdyz je pozastaveny lokalni
         // (singleplayer/integrovany) svet - na multiplayeru/dedikovanem
@@ -83,4 +97,3 @@ public final class CushionScreensClient implements ClientModInitializer {
         });
     }
 }
-

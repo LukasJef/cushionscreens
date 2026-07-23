@@ -16,12 +16,14 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.CompoundTagArgument;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.TextColor;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -57,11 +59,11 @@ public final class CushionScreenCommand {
     private static final int PERF_WARN_PIXELS = 16384;
     private static final int MAX_GIF_FRAMES = 600;
 
-    // PUVODNE 2000 -> pri 17 fps se video po ~118s (2 min) zacyklilo, protoze
-    // pole snimku se prosto oriznulo a prehravani je modulo delky pole.
-    // Zvedeno na rozumny strop, ktery jeste nezpusobi OOM (kazdy snimek je
-    // gridW*gridH intu). Uprav podle velikosti obrazovky / dostupne pameti.
-    private static final int MAX_VIDEO_FRAMES = 30000; // ~25 min pri 20 fps
+    // Kolik snimku videa se maximalne dekoduje - nastavitelne prikazem
+    // /cushionscreens maxframes <cislo>, uklada se do globalni konfigurace
+    // (viz CushionConfig). Vychozi 2000 je puvodni hodnota modu - pokud
+    // chces delsi videa (bez zacykleni po dosazeni limitu), zvys si to.
+    private static final CushionConfig CONFIG = CushionConfig.load();
 
     private static final String FFMPEG = "ffmpeg";
     private static final DyeColor[] DYES = DyeColor.values();
@@ -86,6 +88,12 @@ public final class CushionScreenCommand {
     private static boolean clipPlaying;
     private static int clipIndex;
     private static int clipTickAcc;
+    private static boolean clipLoop;
+
+    // Zamrazi aktualne zobrazeny snimek/vzor (video, gif i /play) - viz
+    // serverTick(). Zadne opetovne dekodovani, jen se prestane
+    // aktualizovat, dokud se nezavola resume.
+    private static boolean paused;
 
     private static volatile int[][] pendingFrames;
     private static volatile int pendingTicksPerFrame;
@@ -97,6 +105,13 @@ public final class CushionScreenCommand {
     private static volatile byte[] pendingAudioPcm;
     private static volatile List<ServerPlayer> pendingAudioTargets;
     private static volatile CushionColorPalette.Mode pendingMode = CushionColorPalette.Mode.DEFAULT;
+    private static volatile boolean pendingLoop;
+    private static volatile int pendingVolume = 100;
+    // Pokud neni null, pouzije se PRIMO jako pole delek jednotlivych
+    // snimku (napr. pro GIF z URL s ruznou delkou kazdeho snimku) misto
+    // jednotneho pendingTicksPerFrame (ktery pocita s konstantnim fps
+    // videa).
+    private static volatile int[] pendingFrameTicks;
 
     // Rezim barev pouzity pro aktualne prehravany klip (gif/video) -
     // potrebne, protoze serverTick() musi vedet, jak dekodovat "flat"
@@ -137,53 +152,35 @@ public final class CushionScreenCommand {
                                 IntegerArgumentType.getInteger(ctx, "height"))))))
                 .then(Commands.literal("image")
                     .then(Commands.argument("file", CushionMediaFileArgument.file())
-                        .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                            CushionColorPalette.Mode.DEFAULT, false))
-                        .then(Commands.literal("bake")
+                        .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"), null))
+                        .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
                             .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                CushionColorPalette.Mode.DEFAULT, true)))
-                        .then(Commands.literal("colors=64")
-                            .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                CushionColorPalette.Mode.COPPER, false))
-                            .then(Commands.literal("bake")
-                                .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                    CushionColorPalette.Mode.COPPER, true))))
-                        .then(Commands.literal("colors=176")
-                            .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                CushionColorPalette.Mode.FULL, false))
-                            .then(Commands.literal("bake")
-                                .executes(ctx -> image(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                    CushionColorPalette.Mode.FULL, true))))))
+                                CompoundTagArgument.getCompoundTag(ctx, "attrs"))))))
                 .then(Commands.literal("gif")
                     .then(Commands.argument("file", CushionMediaFileArgument.file())
-                        .executes(ctx -> gif(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                            CushionColorPalette.Mode.DEFAULT))
-                        .then(Commands.literal("colors=64")
+                        .executes(ctx -> gif(ctx, CushionMediaFileArgument.getFile(ctx, "file"), null))
+                        .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
                             .executes(ctx -> gif(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                CushionColorPalette.Mode.COPPER)))
-                        .then(Commands.literal("colors=176")
-                            .executes(ctx -> gif(ctx, CushionMediaFileArgument.getFile(ctx, "file"),
-                                CushionColorPalette.Mode.FULL)))))
+                                CompoundTagArgument.getCompoundTag(ctx, "attrs"))))))
                 .then(Commands.literal("video")
                     .then(Commands.argument("fps", IntegerArgumentType.integer(1, 30))
                         .then(Commands.argument("file", CushionMediaFileArgument.file())
                             .executes(ctx -> video(ctx,
                                 IntegerArgumentType.getInteger(ctx, "fps"),
                                 CushionMediaFileArgument.getFile(ctx, "file"),
-                                false, null, CushionColorPalette.Mode.DEFAULT))
-                            .then(videoAudioNode(CushionColorPalette.Mode.DEFAULT))
-                            .then(Commands.literal("colors=64")
+                                false, null, null))
+                            .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
                                 .executes(ctx -> video(ctx,
                                     IntegerArgumentType.getInteger(ctx, "fps"),
                                     CushionMediaFileArgument.getFile(ctx, "file"),
-                                    false, null, CushionColorPalette.Mode.COPPER))
-                                .then(videoAudioNode(CushionColorPalette.Mode.COPPER)))
-                            .then(Commands.literal("colors=176")
-                                .executes(ctx -> video(ctx,
-                                    IntegerArgumentType.getInteger(ctx, "fps"),
-                                    CushionMediaFileArgument.getFile(ctx, "file"),
-                                    false, null, CushionColorPalette.Mode.FULL))
-                                .then(videoAudioNode(CushionColorPalette.Mode.FULL))))))
+                                    false, null, CompoundTagArgument.getCompoundTag(ctx, "attrs"))))
+                            .then(videoAudioNode()))))
+                .then(Commands.literal("url")
+                    .then(Commands.argument("url", CushionMediaFileArgument.file())
+                        .executes(ctx -> url(ctx, CushionMediaFileArgument.getFile(ctx, "url"), null))
+                        .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
+                            .executes(ctx -> url(ctx, CushionMediaFileArgument.getFile(ctx, "url"),
+                                CompoundTagArgument.getCompoundTag(ctx, "attrs"))))))
                 .then(Commands.literal("play")
                     .then(Commands.argument("pattern", StringArgumentType.word())
                         .then(Commands.argument("speed", IntegerArgumentType.integer(1, 200))
@@ -193,46 +190,114 @@ public final class CushionScreenCommand {
                 .then(Commands.literal("range")
                     .then(Commands.argument("chunks", IntegerArgumentType.integer(1, 64))
                         .executes(ctx -> range(ctx, IntegerArgumentType.getInteger(ctx, "chunks")))))
+                .then(Commands.literal("maxframes")
+                    .then(Commands.argument("frames", IntegerArgumentType.integer(1))
+                        .executes(ctx -> maxFrames(ctx, IntegerArgumentType.getInteger(ctx, "frames")))))
+                .then(Commands.literal("pause").executes(CushionScreenCommand::pause))
+                .then(Commands.literal("resume").executes(CushionScreenCommand::resume))
                 .then(Commands.literal("stop").executes(CushionScreenCommand::stop))
                 .then(Commands.literal("clear").executes(CushionScreenCommand::clear))
         );
     }
 
-    // Vetev "audio [hraci]" - stejna pro kazdy rezim barev, jen s jinym
-    // "mode" predanym do video().
-    private static LiteralArgumentBuilder<CommandSourceStack> videoAudioNode(CushionColorPalette.Mode mode) {
+    // Vetev "audio [hraci] [{atributy}]" pod /cushionscreens video <fps> <file>.
+    private static LiteralArgumentBuilder<CommandSourceStack> videoAudioNode() {
         return Commands.literal("audio")
             .executes(ctx -> video(ctx,
                 IntegerArgumentType.getInteger(ctx, "fps"),
                 CushionMediaFileArgument.getFile(ctx, "file"),
-                true, null, mode))
+                true, null, null))
+            .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
+                .executes(ctx -> video(ctx,
+                    IntegerArgumentType.getInteger(ctx, "fps"),
+                    CushionMediaFileArgument.getFile(ctx, "file"),
+                    true, null, CompoundTagArgument.getCompoundTag(ctx, "attrs"))))
             .then(Commands.argument("targets", EntityArgument.players())
                 .executes(ctx -> video(ctx,
                     IntegerArgumentType.getInteger(ctx, "fps"),
                     CushionMediaFileArgument.getFile(ctx, "file"),
-                    true, EntityArgument.getPlayers(ctx, "targets"), mode)));
+                    true, EntityArgument.getPlayers(ctx, "targets"), null))
+                .then(Commands.argument("attrs", CompoundTagArgument.compoundTag())
+                    .executes(ctx -> video(ctx,
+                        IntegerArgumentType.getInteger(ctx, "fps"),
+                        CushionMediaFileArgument.getFile(ctx, "file"),
+                        true, EntityArgument.getPlayers(ctx, "targets"),
+                        CompoundTagArgument.getCompoundTag(ctx, "attrs")))));
+    }
+
+    // --- Parsovani {atributy} ---
+
+    private static CushionColorPalette.Mode parseColorsMode(CompoundTag attrs) {
+        if (attrs == null) return CushionColorPalette.Mode.DEFAULT;
+        int colors = attrs.getInt("colors").orElse(16);
+        return CushionColorPalette.Mode.fromColorsValue(colors);
+    }
+
+    private static boolean parseBake(CompoundTag attrs) {
+        return attrs != null && attrs.getBoolean("bake").orElse(false);
+    }
+
+    private static boolean parseLoop(CompoundTag attrs) {
+        return attrs != null && attrs.getBoolean("loop").orElse(false);
+    }
+
+    private static int parseVolume(CompoundTag attrs) {
+        if (attrs == null) return 100;
+        int v = attrs.getInt("volume").orElse(100);
+        return Math.max(0, Math.min(100, v));
+    }
+
+    private static CushionEncoder.ScaleMode parseScaling(CompoundTag attrs) {
+        if (attrs == null) return CushionEncoder.ScaleMode.STRETCH;
+        String s = attrs.getString("scaling").orElse("stretch");
+        if ("crop".equalsIgnoreCase(s)) return CushionEncoder.ScaleMode.CROP;
+        if ("fit".equalsIgnoreCase(s)) return CushionEncoder.ScaleMode.FIT;
+        return CushionEncoder.ScaleMode.STRETCH;
+    }
+
+    private static double parseSeek(CompoundTag attrs) {
+        if (attrs == null) return 0;
+        return Math.max(0, attrs.getInt("seek").orElse(0));
     }
 
     private static int help(CommandContext<CommandSourceStack> ctx) {
         CommandSourceStack src = ctx.getSource();
         line(src, header("CushionScreens"));
         line(src, cmdLine("/cushionscreens build <width> <height>", "Create a screen in front of you"));
-        line(src, cmdLine("/cushionscreens image <file> [colors=64|176] [bake]", "Show an image"));
-        line(src, cmdLine("/cushionscreens gif <file> [colors=64|176]", "Play a GIF"));
-        line(src, cmdLine("/cushionscreens video <fps> <file> [colors=64|176]", "Play a video (needs FFmpeg)"));
-        line(src, cmdLine("/cushionscreens video <fps> <file> [colors=64|176] audio [targets]", "Play with sound, optionally only for @a/@p/a player"));
+        line(src, cmdLine("/cushionscreens image <file> [{attrs}]", "Show an image"));
+        line(src, cmdLine("/cushionscreens gif <file> [{attrs}]", "Play a GIF"));
+        line(src, cmdLine("/cushionscreens url <url> [{attrs}]", "Show an image or GIF from a direct http(s) link"));
+        line(src, cmdLine("/cushionscreens video <fps> <file> [{attrs}]", "Play a video (needs FFmpeg)"));
+        line(src, cmdLine("/cushionscreens video <fps> <file> audio [targets] [{attrs}]", "Play with sound, optionally only for @a/@p/a player"));
         line(src, cmdLine("/cushionscreens play <pattern> <speed>", "Patterns: plasma, rainbow, bars, noise"));
         line(src, cmdLine("/cushionscreens range <chunks>", "Set view distance, then rebuild"));
+        line(src, cmdLine("/cushionscreens maxframes <number>", "Max video frames to decode (default 2000)"));
+        line(src, cmdLine("/cushionscreens pause", "Freeze the current frame/pattern (and audio)"));
+        line(src, cmdLine("/cushionscreens resume", "Continue exactly where it was paused"));
         line(src, cmdLine("/cushionscreens stop", "Stop playback"));
         line(src, cmdLine("/cushionscreens clear", "Remove the screen"));
+        line(src, header("Attributes"));
+        line(src, info("Attributes go after the file/url (and after audio/targets for video),"));
+        line(src, info("in NBT form, e.g.: video 20 clip.mp4 audio @a {colors:176,seek:120}"));
+        line(src, info("colors: 16 (default), 17 (16 + a true black), 64 (copper bulb"));
+        line(src, info("stages), 80 (64 + no-light variant), or 176 (all light levels)."));
+        line(src, info("loop: true - video/gif repeats forever (audio too) instead of"));
+        line(src, info("stopping on a blank screen after playing once."));
+        line(src, info("volume: 0-100 - video audio volume, independent of Minecraft's own"));
+        line(src, info("sound sliders (default 100)."));
+        line(src, info("seek: seconds - video only, start playback (and audio) partway in."));
+        line(src, info("scaling: stretch (default), crop, or fit. stretch fills the screen"));
+        line(src, info("exactly but can distort the image; crop keeps proportions and cuts"));
+        line(src, info("off the overflow; fit keeps proportions and letterboxes with black"));
+        line(src, info("bars instead of cropping."));
+        line(src, info("bake: true - image only, see below."));
         line(src, header("Colors"));
         line(src, info("Default is 16 colors, always glowing (waxed copper bulb underneath -"));
-        line(src, info("visible at night too). colors=64 adds 4 copper-bulb brightness levels"));
-        line(src, info("(64 total); colors=176 adds all 11 levels (176 total). Higher color"));
-        line(src, info("counts change a block every pixel, which is much slower than the"));
-        line(src, info("default, especially for /video and /gif."));
+        line(src, info("visible at night too). Higher color counts change a block every"));
+        line(src, info("pixel, which is much slower than the default, especially for"));
+        line(src, info("/video and /gif."));
         line(src, header("Bake"));
-        line(src, info("image ... bake shows the image, then forgets the cushions were a"));
+        line(src, info("image ... {bake:true} shows the image, then forgets the cushions were a"));
         line(src, info("screen - they stay forever as a normal picture, and you can build a"));
         line(src, info("new screen elsewhere. stop/clear/video/gif no longer affect it."));
         line(src, header("Persistence"));
@@ -306,9 +371,12 @@ public final class CushionScreenCommand {
         return 1;
     }
 
-    private static int image(CommandContext<CommandSourceStack> ctx, String file, CushionColorPalette.Mode mode, boolean bake) {
+    private static int image(CommandContext<CommandSourceStack> ctx, String file, CompoundTag attrs) {
         CommandSourceStack src = ctx.getSource();
         if (pixels == null) return needScreen(src);
+        CushionColorPalette.Mode mode = parseColorsMode(attrs);
+        boolean bake = parseBake(attrs);
+        CushionEncoder.ScaleMode scaling = parseScaling(attrs);
         stopAll(src.getServer());
         try {
             File f = resolveMedia(file);
@@ -319,7 +387,7 @@ public final class CushionScreenCommand {
                 return 0;
             }
             int[] palette = CushionColorPalette.buildFlatPalette(mode);
-            int[] idx = CushionEncoder.encode(img, gridW, gridH, palette, true);
+            int[] idx = CushionEncoder.encode(img, gridW, gridH, palette, true, scaling);
             applyMediaFrame(idx, mode);
             if (bake) {
                 // "Zapece" aktualni obsah natrvalo - cushiony a bloky
@@ -346,9 +414,12 @@ public final class CushionScreenCommand {
         }
     }
 
-    private static int gif(CommandContext<CommandSourceStack> ctx, String file, CushionColorPalette.Mode mode) {
+    private static int gif(CommandContext<CommandSourceStack> ctx, String file, CompoundTag attrs) {
         CommandSourceStack src = ctx.getSource();
         if (pixels == null) return needScreen(src);
+        CushionColorPalette.Mode mode = parseColorsMode(attrs);
+        boolean loop = parseLoop(attrs);
+        CushionEncoder.ScaleMode scaling = parseScaling(attrs);
         stopAll(src.getServer());
         try {
             File f = resolveMedia(file);
@@ -359,11 +430,11 @@ public final class CushionScreenCommand {
             int[][] frames = new int[n][];
             int[] ticks = new int[n];
             for (int i = 0; i < n; ++i) {
-                frames[i] = CushionEncoder.encode(clip.frames[i], gridW, gridH, palette, true);
+                frames[i] = CushionEncoder.encode(clip.frames[i], gridW, gridH, palette, true, scaling);
                 ticks[i] = Math.max(1, Math.round(clip.delayCentis[i] / 5.0f));
             }
-            startClip(src.getServer(), frames, ticks, mode);
-            say(src, "Playing " + file + colorSuffix(mode) + " (" + n + " frames).");
+            startClip(src.getServer(), frames, ticks, mode, loop);
+            say(src, "Playing " + file + colorSuffix(mode) + " (" + n + " frames)" + (loop ? ", looping" : "") + ".");
             return 1;
         } catch (Throwable t) {
             CushionScreens.LOG.error("Failed to load GIF", t);
@@ -373,9 +444,14 @@ public final class CushionScreenCommand {
     }
 
     private static int video(CommandContext<CommandSourceStack> ctx, int fps, String file, boolean audio,
-                              Collection<ServerPlayer> targets, CushionColorPalette.Mode mode) throws CommandSyntaxException {
+                              Collection<ServerPlayer> targets, CompoundTag attrs) throws CommandSyntaxException {
         CommandSourceStack src = ctx.getSource();
         if (pixels == null) return needScreen(src);
+        CushionColorPalette.Mode mode = parseColorsMode(attrs);
+        boolean loop = parseLoop(attrs);
+        int volume = parseVolume(attrs);
+        CushionEncoder.ScaleMode scaling = parseScaling(attrs);
+        double seek = parseSeek(attrs);
         final String fileName = file.trim();
         // null = vysilat vsem hracum na serveru (vychozi chovani).
         final List<ServerPlayer> audioTargets = targets == null ? null : new ArrayList<>(targets);
@@ -393,15 +469,16 @@ public final class CushionScreenCommand {
         int gw = gridW;
         int gh = gridH;
         int[] palette = CushionColorPalette.buildFlatPalette(mode);
-        say(src, "Loading " + fileName + colorSuffix(mode) + (audio ? " (with audio)" : "") + ". It will start playing shortly."
+        say(src, "Loading " + fileName + colorSuffix(mode) + (audio ? " (with audio)" : "") + (loop ? " (looping)" : "")
+            + (seek > 0 ? " (seek " + seek + "s)" : "") + ". It will start playing shortly."
             + (mode != CushionColorPalette.Mode.DEFAULT ? " This may cause lag while playing (changes blocks every frame)." : ""));
         Thread t = new Thread(() -> {
             try {
-                int[][] frames = CushionVideo.decodeToIndices(FFMPEG, f, gw, gh, fps, MAX_VIDEO_FRAMES, palette);
+                int[][] frames = CushionVideo.decodeToIndices(FFMPEG, f, gw, gh, fps, CONFIG.maxFrames, palette, scaling, seek);
                 byte[] pcm = null;
                 if (audio) {
                     try {
-                        pcm = CushionAudio.extractPcm(FFMPEG, f);
+                        pcm = CushionAudio.extractPcm(FFMPEG, f, seek);
                     } catch (Throwable audioErr) {
                         CushionScreens.LOG.warn("Failed to extract audio, playing silently", audioErr);
                     }
@@ -414,6 +491,8 @@ public final class CushionScreenCommand {
                 pendingAudioPcm = pcm;
                 pendingAudioTargets = audioTargets;
                 pendingMode = mode;
+                pendingLoop = loop;
+                pendingVolume = volume;
                 pendingFrames = frames;
             } catch (Throwable e) {
                 pendingNotify = player;
@@ -426,11 +505,81 @@ public final class CushionScreenCommand {
         return 1;
     }
 
+    // Stahne obrazek nebo GIF z http(s) URL a zobrazi ho stejne jako
+    // /cushionscreens image resp. gif - poznamena se podle prvnich bajtu
+    // (GIF87a/GIF89a magic), ne podle koncovky URL (ta casto chybi, napr.
+    // i.imgur.com/xyz bez pripony). Video/audio streamy z URL zatim
+    // nejsou podporovane.
+    private static int url(CommandContext<CommandSourceStack> ctx, String url, CompoundTag attrs) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (pixels == null) return needScreen(src);
+        CushionColorPalette.Mode mode = parseColorsMode(attrs);
+        boolean loopAttr = parseLoop(attrs);
+        CushionEncoder.ScaleMode scaling = parseScaling(attrs);
+        ServerPlayer player = src.getPlayerOrException();
+        int gw = gridW;
+        int gh = gridH;
+        say(src, "Downloading " + url + "...");
+        Thread t = new Thread(() -> {
+            try {
+                byte[] data = CushionUrlFetch.download(url);
+                Path cacheFile = mediaDir().resolve(".cache-url");
+                Files.createDirectories(cacheFile.getParent());
+                Files.write(cacheFile, data);
+
+                int[] palette = CushionColorPalette.buildFlatPalette(mode);
+                int[][] frames;
+                int[] frameTicks;
+                String label;
+                boolean loop;
+                if (CushionUrlFetch.looksLikeGif(data)) {
+                    CushionGif.Clip clip = CushionGif.decode(cacheFile.toFile(), MAX_GIF_FRAMES);
+                    int n = clip.frames.length;
+                    frames = new int[n][];
+                    frameTicks = new int[n];
+                    for (int i = 0; i < n; ++i) {
+                        frames[i] = CushionEncoder.encode(clip.frames[i], gw, gh, palette, true, scaling);
+                        frameTicks[i] = Math.max(1, Math.round(clip.delayCentis[i] / 5.0f));
+                    }
+                    loop = loopAttr;
+                    label = "GIF from " + url + (loop ? ", looping" : "");
+                } else {
+                    BufferedImage img = ImageIO.read(cacheFile.toFile());
+                    if (img == null) throw new IOException("Could not decode that as an image or GIF");
+                    int[] idx = CushionEncoder.encode(img, gw, gh, palette, true, scaling);
+                    frames = new int[][]{idx};
+                    // Staticky obrazek - obrovsky pocet ticku na "snimek" =
+                    // v praxi nikdy nedobehne, chova se jako trvaly obrazek.
+                    // "loop" na jedinem snimku stejne nic nemeni.
+                    frameTicks = new int[]{Integer.MAX_VALUE / 2};
+                    loop = true;
+                    label = "image from " + url;
+                }
+                pendingW = gw;
+                pendingH = gh;
+                pendingFrameTicks = frameTicks;
+                pendingLabel = label;
+                pendingNotify = player;
+                pendingMode = mode;
+                pendingLoop = loop;
+                pendingFrames = frames;
+            } catch (Throwable e) {
+                pendingNotify = player;
+                pendingError = e.getMessage() == null ? e.toString() : e.getMessage();
+                CushionScreens.LOG.error("Failed to load URL", e);
+            }
+        }, "cushionscreens-url");
+        t.setDaemon(true);
+        t.start();
+        return 1;
+    }
+
     private static int play(CommandContext<CommandSourceStack> ctx, String pat, int speed) {
         CommandSourceStack src = ctx.getSource();
         if (pixels == null) return needScreen(src);
         stopAudioBroadcast(src.getServer());
         clipPlaying = false;
+        paused = false;
         pattern = pat.toLowerCase();
         periodTicks = speed;
         tickCounter = 0;
@@ -445,6 +594,41 @@ public final class CushionScreenCommand {
         EntityType<?> t = BuiltInRegistries.ENTITY_TYPE.getValue(Identifier.withDefaultNamespace("cushion"));
         if (t != null) applyViewRange(t);
         say(ctx.getSource(), "View distance set to " + chunks + " chunks. Rebuild the screen to apply.");
+        return 1;
+    }
+
+    private static int maxFrames(CommandContext<CommandSourceStack> ctx, int frames) {
+        CONFIG.maxFrames = frames;
+        CONFIG.save();
+        say(ctx.getSource(), "Max video frames set to " + frames + " (applies to videos loaded from now on).");
+        return 1;
+    }
+
+    private static int pause(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack src = ctx.getSource();
+        if (!playing && !clipPlaying) {
+            say(src, "Nothing is currently playing.");
+            return 0;
+        }
+        if (paused) {
+            say(src, "Already paused.");
+            return 0;
+        }
+        paused = true;
+        CushionAudioNetworkServer.pauseAll(src.getServer());
+        say(src, "Paused.");
+        return 1;
+    }
+
+    private static int resume(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack src = ctx.getSource();
+        if (!paused) {
+            say(src, "Not paused.");
+            return 0;
+        }
+        paused = false;
+        CushionAudioNetworkServer.resumeAll(src.getServer());
+        say(src, "Resumed.");
         return 1;
     }
 
@@ -489,6 +673,10 @@ public final class CushionScreenCommand {
         }
         installPendingVideo(server);
         if (pixels == null) return;
+        // Zamrzne presne na aktualnim snimku/vzoru - nic se dal
+        // nedekoduje ani neaktualizuje, dokud nepijde /cushionscreens
+        // resume. Zadne opetovne nacitani od zacatku.
+        if (paused) return;
 
         if (clipPlaying && clipFrames != null && clipFrames.length > 0) {
             if (clipFrames[clipIndex].length != gridW * gridH) {
@@ -497,8 +685,21 @@ public final class CushionScreenCommand {
             }
             if (++clipTickAcc >= clipFrameTicks[clipIndex]) {
                 clipTickAcc = 0;
-                clipIndex = (clipIndex + 1) % clipFrames.length;
-                applyMediaFrame(clipFrames[clipIndex], clipMode);
+                if (clipIndex + 1 >= clipFrames.length) {
+                    if (clipLoop) {
+                        clipIndex = 0;
+                        applyMediaFrame(clipFrames[0], clipMode);
+                    } else {
+                        // Konec bez loop - zastavit a ukazat vychozi
+                        // bilou obrazovku (16 barev, waxed copper bulb).
+                        clipPlaying = false;
+                        stopAudioBroadcast(server);
+                        showDefaultBlankScreen();
+                    }
+                } else {
+                    clipIndex++;
+                    applyMediaFrame(clipFrames[clipIndex], clipMode);
+                }
             }
             return;
         }
@@ -514,6 +715,14 @@ public final class CushionScreenCommand {
             applyMediaFrame(buf, CushionColorPalette.Mode.DEFAULT);
             ++frame;
         }
+    }
+
+    // Vychozi bila obrazovka po doběhnutí videa/gifu bez loop - 16 barev,
+    // flat index 0 = (dye WHITE, tier 0/waxed copper bulb).
+    private static void showDefaultBlankScreen() {
+        if (pixels == null) return;
+        int[] blank = new int[gridW * gridH];
+        applyMediaFrame(blank, CushionColorPalette.Mode.DEFAULT);
     }
 
     private static void installPendingVideo(MinecraftServer server) {
@@ -538,6 +747,12 @@ public final class CushionScreenCommand {
         pendingAudioTargets = null;
         CushionColorPalette.Mode mode = pendingMode;
         pendingMode = CushionColorPalette.Mode.DEFAULT;
+        boolean loop = pendingLoop;
+        pendingLoop = false;
+        int volume = pendingVolume;
+        pendingVolume = 100;
+        int[] presetTicks = pendingFrameTicks;
+        pendingFrameTicks = null;
 
         if (pixels == null || pendingW != gridW || pendingH != gridH) {
             if (p != null) {
@@ -545,19 +760,24 @@ public final class CushionScreenCommand {
             }
             return;
         }
-        int[] ticks = new int[frames.length];
-        Arrays.fill(ticks, pendingTicksPerFrame);
-        startClip(server, frames, ticks, mode);
+        int[] ticks;
+        if (presetTicks != null) {
+            ticks = presetTicks;
+        } else {
+            ticks = new int[frames.length];
+            Arrays.fill(ticks, pendingTicksPerFrame);
+        }
+        startClip(server, frames, ticks, mode, loop);
 
         if (pcm != null) {
-            CushionAudioNetworkServer.broadcast(server, pcm, CushionAudio.SAMPLE_RATE, CushionAudio.CHANNELS, audioTargets);
+            CushionAudioNetworkServer.broadcast(server, pcm, CushionAudio.SAMPLE_RATE, CushionAudio.CHANNELS, audioTargets, loop, volume);
         }
         if (p != null) {
             p.sendSystemMessage(Component.literal("Now playing " + pendingLabel + (pcm != null ? " (with audio)" : "") + "."));
         }
     }
 
-    private static void startClip(MinecraftServer server, int[][] frames, int[] ticks, CushionColorPalette.Mode mode) {
+    private static void startClip(MinecraftServer server, int[][] frames, int[] ticks, CushionColorPalette.Mode mode, boolean loop) {
         stopAll(server);
         clipFrames = frames;
         clipFrameTicks = ticks;
@@ -565,6 +785,7 @@ public final class CushionScreenCommand {
         clipTickAcc = 0;
         clipPlaying = true;
         clipMode = mode;
+        clipLoop = loop;
         applyMediaFrame(frames[0], mode);
     }
 
@@ -578,7 +799,7 @@ public final class CushionScreenCommand {
             for (int x = 0; x < gridW; ++x) {
                 int i = z * gridW + x;
                 int flat = idx[i];
-                int dye = CushionColorPalette.dyeIndexForPixel(flat);
+                int dye = CushionColorPalette.dyeIndexForPixel(mode, flat);
                 Cushion c = pixels[i];
                 if (c != null && !c.isRemoved()) {
                     c.setColor(DYES[Math.floorMod(dye, DYES.length)]);
@@ -594,7 +815,7 @@ public final class CushionScreenCommand {
     }
 
     private static String colorSuffix(CushionColorPalette.Mode mode) {
-        return mode == CushionColorPalette.Mode.DEFAULT ? "" : " (" + (mode.tierIndices.length * 16) + " colors)";
+        return mode == CushionColorPalette.Mode.DEFAULT ? "" : " (" + mode.totalColors + " colors)";
     }
 
     private static int colorIndexAt(int x, int y, int f) {
@@ -737,6 +958,7 @@ public final class CushionScreenCommand {
     private static void stopAll(MinecraftServer server) {
         playing = false;
         clipPlaying = false;
+        paused = false;
         stopAudioBroadcast(server);
     }
 

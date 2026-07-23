@@ -13,10 +13,42 @@ public final class CushionVideo {
     private CushionVideo() {
     }
 
-    public static int[][] decodeToIndices(String ffmpeg, File file, int gw, int gh, int fps, int maxFrames, int[] palette) throws IOException, InterruptedException {
+    public static int[][] decodeToIndices(String ffmpeg, File file, int gw, int gh, int fps, int maxFrames, int[] palette,
+                                           CushionEncoder.ScaleMode scaleMode, double seekSeconds) throws IOException, InterruptedException {
         Process proc;
-        String filter = "fps=" + fps + ",scale=" + gw + ":" + gh + ":flags=area";
-        ProcessBuilder pb = new ProcessBuilder(ffmpeg, "-nostdin", "-i", file.getAbsolutePath(), "-vf", filter, "-f", "rawvideo", "-pix_fmt", "rgb24", "-v", "error", "pipe:1");
+        // STRETCH: roztahne presne na gw:gh (ignoruje pomer stran).
+        // CROP: preskaluje tak, aby cela cilova plocha byla pokryta (bez
+        // deformace), a orizne prebytek na stred - standardni ffmpeg idiom
+        // scale+force_original_aspect_ratio=increase,crop.
+        // FIT: preskaluje tak, aby se cely obraz vesel dovnitr (bez
+        // deformace i bez oriznuti) a zbytek se dopadduje cerne -
+        // scale+force_original_aspect_ratio=decrease,pad.
+        String filter = switch (scaleMode) {
+            case CROP -> "fps=" + fps + ",scale=" + gw + ":" + gh + ":force_original_aspect_ratio=increase:flags=area,crop=" + gw + ":" + gh;
+            case FIT -> "fps=" + fps + ",scale=" + gw + ":" + gh + ":force_original_aspect_ratio=decrease:flags=area,pad=" + gw + ":" + gh + ":(ow-iw)/2:(oh-ih)/2:color=black";
+            default -> "fps=" + fps + ",scale=" + gw + ":" + gh + ":flags=area";
+        };
+        ArrayList<String> cmd = new ArrayList<>();
+        cmd.add(ffmpeg);
+        cmd.add("-nostdin");
+        if (seekSeconds > 0) {
+            // -ss PRED -i = rychle a presne seekovani na klicovy snimek
+            // (ffmpeg preskoci, misto aby dekodoval a zahazoval snimky).
+            cmd.add("-ss");
+            cmd.add(String.valueOf(seekSeconds));
+        }
+        cmd.add("-i");
+        cmd.add(file.getAbsolutePath());
+        cmd.add("-vf");
+        cmd.add(filter);
+        cmd.add("-f");
+        cmd.add("rawvideo");
+        cmd.add("-pix_fmt");
+        cmd.add("rgb24");
+        cmd.add("-v");
+        cmd.add("error");
+        cmd.add("pipe:1");
+        ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(false);
         try {
             proc = pb.start();

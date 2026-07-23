@@ -16,7 +16,7 @@ import net.minecraft.resources.Identifier;
  * podle verze, na kterou tvuj projekt cili (stejne jako u ostatnich API,
  * ktera uz mod pouziva, napr. Identifier misto ResourceLocation).
  */
-public record CushionAudioStart(int sampleRate, int channels, int totalBytes) implements CustomPacketPayload {
+public record CushionAudioStart(int sampleRate, int channels, int totalBytes, boolean loop, int volume) implements CustomPacketPayload {
 
     public static final Type<CushionAudioStart> TYPE =
         new Type<>(Identifier.fromNamespaceAndPath("cushionscreens", "audio_start"));
@@ -26,8 +26,10 @@ public record CushionAudioStart(int sampleRate, int channels, int totalBytes) im
             buf.writeInt(value.sampleRate);
             buf.writeInt(value.channels);
             buf.writeInt(value.totalBytes);
+            buf.writeBoolean(value.loop);
+            buf.writeInt(value.volume);
         },
-        buf -> new CushionAudioStart(buf.readInt(), buf.readInt(), buf.readInt())
+        buf -> new CushionAudioStart(buf.readInt(), buf.readInt(), buf.readInt(), buf.readBoolean(), buf.readInt())
     );
 
     @Override

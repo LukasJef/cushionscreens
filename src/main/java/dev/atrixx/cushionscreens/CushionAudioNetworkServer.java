@@ -1,6 +1,8 @@
 package dev.atrixx.cushionscreens;
 
 import dev.atrixx.cushionscreens.network.CushionAudioChunk;
+import dev.atrixx.cushionscreens.network.CushionAudioPause;
+import dev.atrixx.cushionscreens.network.CushionAudioResume;
 import dev.atrixx.cushionscreens.network.CushionAudioStart;
 import dev.atrixx.cushionscreens.network.CushionAudioStop;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -27,14 +29,16 @@ public final class CushionAudioNetworkServer {
         PayloadTypeRegistry.clientboundPlay().register(CushionAudioStart.TYPE, CushionAudioStart.CODEC);
         PayloadTypeRegistry.clientboundPlay().register(CushionAudioChunk.TYPE, CushionAudioChunk.CODEC);
         PayloadTypeRegistry.clientboundPlay().register(CushionAudioStop.TYPE, CushionAudioStop.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(CushionAudioPause.TYPE, CushionAudioPause.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(CushionAudioResume.TYPE, CushionAudioResume.CODEC);
     }
 
     public static void broadcast(MinecraftServer server, byte[] pcm, int sampleRate, int channels,
-                                  Collection<ServerPlayer> targets) {
+                                  Collection<ServerPlayer> targets, boolean loop, int volume) {
         Collection<ServerPlayer> players = targets != null ? targets : server.getPlayerList().getPlayers();
         for (ServerPlayer player : players) {
             if (!ServerPlayNetworking.canSend(player, CushionAudioStart.TYPE)) continue;
-            ServerPlayNetworking.send(player, new CushionAudioStart(sampleRate, channels, pcm.length));
+            ServerPlayNetworking.send(player, new CushionAudioStart(sampleRate, channels, pcm.length, loop, volume));
             for (int off = 0; off < pcm.length; off += CHUNK_SIZE) {
                 int len = Math.min(CHUNK_SIZE, pcm.length - off);
                 byte[] chunk = new byte[len];
@@ -48,6 +52,20 @@ public final class CushionAudioNetworkServer {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (!ServerPlayNetworking.canSend(player, CushionAudioStop.TYPE)) continue;
             ServerPlayNetworking.send(player, new CushionAudioStop());
+        }
+    }
+
+    public static void pauseAll(MinecraftServer server) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (!ServerPlayNetworking.canSend(player, CushionAudioPause.TYPE)) continue;
+            ServerPlayNetworking.send(player, new CushionAudioPause());
+        }
+    }
+
+    public static void resumeAll(MinecraftServer server) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (!ServerPlayNetworking.canSend(player, CushionAudioResume.TYPE)) continue;
+            ServerPlayNetworking.send(player, new CushionAudioResume());
         }
     }
 }

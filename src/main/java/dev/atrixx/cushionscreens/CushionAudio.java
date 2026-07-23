@@ -21,17 +21,29 @@ public final class CushionAudio {
     private CushionAudio() {
     }
 
-    public static byte[] extractPcm(String ffmpeg, File file) throws IOException, InterruptedException {
-        ProcessBuilder pb = new ProcessBuilder(
-            ffmpeg, "-nostdin", "-i", file.getAbsolutePath(),
-            "-vn",
-            "-ac", String.valueOf(CHANNELS),
-            "-ar", String.valueOf(SAMPLE_RATE),
-            "-f", "s16le",
-            "-acodec", "pcm_s16le",
-            "-v", "error",
-            "pipe:1"
-        );
+    public static byte[] extractPcm(String ffmpeg, File file, double seekSeconds) throws IOException, InterruptedException {
+        java.util.ArrayList<String> cmd = new java.util.ArrayList<>();
+        cmd.add(ffmpeg);
+        cmd.add("-nostdin");
+        if (seekSeconds > 0) {
+            cmd.add("-ss");
+            cmd.add(String.valueOf(seekSeconds));
+        }
+        cmd.add("-i");
+        cmd.add(file.getAbsolutePath());
+        cmd.add("-vn");
+        cmd.add("-ac");
+        cmd.add(String.valueOf(CHANNELS));
+        cmd.add("-ar");
+        cmd.add(String.valueOf(SAMPLE_RATE));
+        cmd.add("-f");
+        cmd.add("s16le");
+        cmd.add("-acodec");
+        cmd.add("pcm_s16le");
+        cmd.add("-v");
+        cmd.add("error");
+        cmd.add("pipe:1");
+        ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(false);
 
         Process proc;

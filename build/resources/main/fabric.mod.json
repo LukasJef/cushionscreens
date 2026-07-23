@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "cushionscreens",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "name": "CushionScreens",
   "description": "Show images, GIFs, and videos (with optional audio) on a screen made of cushions.",
   "authors": ["atrixx"],
